@@ -1,121 +1,168 @@
-#include "Bounce2.h"
+////////////////////////////////// LIBRARIES ///////////////////////////////////
+// Used to create non blocking simultaneous code modules
+#include <SimpleTimer.h>
+// Used to de-bounce the button
+#include <Bounce2.h>
 
-// From experimental measurements, a value of around 200 means well watered
-// while a value of around 600 means not watered at all
-const int MIN = 200;
-const int MAX = 600;
+/////////////////////// PROTOTYPES AND GLOBAL VARIABLES ////////////////////////
+SimpleTimer timer;
 
+void checkSoilHumidity();
+    bool watering = false;
+    int wateringTimerID = timer.MAX_TIMERS;
+    int humidityPerCent();
+    void togglePumpState();
+        bool pumpState = LOW;
+
+
+void checkReservoirLevel();
+    bool reservoirEmpty = false;
+    void notifyEmptyReservoir();
+
+void checkPumpOverride();
+    Bounce bouncer = Bounce();
+
+void log();
+    unsigned int cur_min = 1023;
+    unsigned int cur_max = 0;
+
+////////////////////////////////// CONSTANTS ///////////////////////////////////
 const int pumpPin = 2;
-const int waterLevelPin = 3;
+const int reservoirPin = 3;
 const int buzzerPin = 4;
 const int buttonPin = 5;
-const int hygroPin = A0;
+const int humidityPin = A0;
+// From experimental measurements, a value of around 200 means well watered
+// while a value of around 600 means not watered at all
+const int MIN_HUMIDITY = 200;
+const int MAX_HUMIDITY = 600;
 
-bool wattering = false;
-
-// Button (debounced)
-Bounce bouncer = Bounce();
-
-// Prototypes
-void log();
-int hygroPerCent();
-
+////////////////////////////// BUILTIN FUNCTIONS ///////////////////////////////
 void setup() {
     Serial.begin(9600);
+
     pinMode(pumpPin, OUTPUT);
-    pinMode(waterLevelPin, INPUT);
+    pinMode(reservoirPin, INPUT);
     pinMode(buzzerPin, OUTPUT);
+    pinMode(LED_BUILTIN, OUTPUT);
 
     pinMode(buttonPin, INPUT);
     bouncer.attach(buttonPin);
     bouncer.interval(5);
+
+    timer.setInterval(5000, checkSoilHumidity);
+    timer.setInterval(5000, checkReservoirLevel);
+    timer.setInterval(0, checkPumpOverride);
+    timer.setInterval(1000, log);
 }
 
 void loop() {
-    log();
+    timer.run();
+}
 
-    /**
-     * If the soil humidity falls bellow 10%, activate the pump for one second,
-     * and deactivate it. Do it again on the next loop, until the humidity goes
-     * above 70%
-     */
-    if (hygroPerCent() < 10)
-        wattering = true;
-    else if (hygroPerCent() > 70)
-        wattering = false;
-
-    if (wattering) {
-        // Activate the pump in bursts, so that the sensor has time to respond
-        digitalWrite(pumpPin, HIGH);
-        delay(1000);
-        digitalWrite(pumpPin, LOW);
-        delay(4000);
+/////////////////////////////// IMPLEMENTATIONS ////////////////////////////////
+/**
+ * Check the soil's humidity, and if it falls bellow 10%, activate the pump.
+ * Stop the pump once the humidity goes above 50%.
+ */
+void checkSoilHumidity() {
+    if (humidityPerCent() < 10) {
+        watering = true;
+    }
+    else if (humidityPerCent() > 50) {
+        watering = false;
     }
 
-    /**
-     * If reservoir is empty, activate buzzer
-     */
-    if (!digitalRead(waterLevelPin)) {
-        tone(buzzerPin, 2500, 200);
-        delay(300);
-        tone(buzzerPin, 2500, 200);
+    if (watering) {
+        // Activate the pump for one second and then deactivate it. We activate
+        // it in bursts so that the soil has time to absorb the water and the
+        // sensor can pick up the new humidity.
+        timer.setTimeout(0, togglePumpState);
+        timer.setTimeout(1000, togglePumpState);
     }
+}
 
-    /**
-     * While the button is being pressed, and the reservoir is not empty, keep
-     * the pump running
-     */
+/**
+ * Return the soil humidity, in percentage.
+ * @return The humidity in percentage. 100% means most humid, and 0% not humid
+ *             at all
+ */
+int humidityPerCent() {
+    // Read the sensor's value
+    int humidityValue = analogRead(humidityPin);
+
+    humidityValue = constrain(humidityValue, MIN_HUMIDITY, MAX_HUMIDITY);
+    humidityValue = map(humidityValue, MIN_HUMIDITY, MAX_HUMIDITY, 100, 0);
+
+    return humidityValue;
+}
+
+/**
+ * Toggle the pump's state to activate or deactivate it.
+ */
+void togglePumpState() {
+    pumpState = !pumpState;
+    digitalWrite(pumpPin, pumpState);
+    digitalWrite(LED_BUILTIN, pumpState);
+}
+
+/**
+ * Check if the reservoir is empty, and if it is set the homonymous variable and
+ * notify using the buzzer.
+ */
+void checkReservoirLevel() {
+    if (!digitalRead(reservoirPin)) {
+        reservoirEmpty = true;
+
+        timer.setTimeout(0, notifyEmptyReservoir);
+        timer.setTimeout(400, notifyEmptyReservoir);
+    }
+    else {
+        reservoirEmpty = false;
+    }
+}
+
+/**
+ * Activate the buzzer for 200 ms at 2500 Hz.
+ */
+void notifyEmptyReservoir() {
+    tone(buzzerPin, 3729, 200);
+}
+
+/**
+ * While the button is being pressed, and the reservoir is not empty, keep the
+ * pump running. Used to empty the reservoir.
+ */
+void checkPumpOverride() {
     bouncer.update();
     if (bouncer.rose()) {
-        digitalWrite(pumpPin, HIGH);
+        togglePumpState();
     }
-    else if (bouncer.fell()) {
-        digitalWrite(pumpPin, LOW);
-    }
-
-    delay(2000);
 }
 
 /**
  * Just for debugging purposes.
  */
-unsigned int min = 1023;
-unsigned int max = 0;
 void log() {
     // Get the current value of hygrometer's sensor
-    unsigned int cur = analogRead(hygroPin);
+    unsigned int cur = analogRead(humidityPin);
     // Update minimum and maximum measured values
-    if (min > cur)
-        min = cur;
-    if (max < cur)
-        max = cur;
+    if (cur < cur_min)
+        cur_min = cur;
+    else if (cur > cur_max)
+        cur_max = cur;
 
     // Print values as: current (minimum, maximum)
     Serial.print(cur);
     Serial.print(" (");
-    Serial.print(min);
+    Serial.print(cur_min);
     Serial.print(", ");
-    Serial.print(max);
+    Serial.print(cur_max);
     Serial.println(")");
 
     // Print current value in percentage
     Serial.print("hygro: ");
-    Serial.print(hygroPerCent());
+    Serial.print(humidityPerCent());
     Serial.println("%");
     Serial.println();
-}
-
-/**
- * Return the soil humidity, in percentage
- * @return          The humidity in percentage. 100% means most humid, and 0%
- *                  not humid at all
- */
-int hygroPerCent() {
-    // Read the sensor's value
-    int hygroValue = analogRead(hygroPin);
-
-    hygroValue = constrain(hygroValue, MIN, MAX);
-    hygroValue = map(hygroValue, MIN, MAX, 100, 0);
-
-    return hygroValue;
 }
